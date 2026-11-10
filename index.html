@@ -63,6 +63,13 @@ video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000;border-r
       <button id="copy">Copiar link</button>
       <span id="count">0 assistindo</span>
     </div>
+    <div class="bar" id="hostbar2" hidden>
+      <button id="btnPrev" class="sec">Mostrar prévia</button>
+      <button id="btnSom" class="sec">Som: ligado</button>
+      <button id="btnTroca" class="sec">Trocar tela</button>
+      <button id="btnParar" class="sec">Encerrar</button>
+    </div>
+    <div id="aviso" hidden style="color:var(--mute);padding:28px;text-align:center">Transmitindo. A prévia está oculta para poupar o seu computador.</div>
     <div class="bar" id="viewbar" hidden>
       <button id="sound" class="sec">Ativar som</button>
       <button id="full" class="sec">Tela cheia</button>
@@ -103,6 +110,12 @@ $('copy0').onclick = async () => {
   $('copy0').textContent = 'Link copiado';
   setTimeout(() => $('copy0').textContent = 'Copiar link', 1800);
 };
+
+const CAPTURA = {
+  video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+  audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+};
+let somLigado = true, previa = false;
 
 let sb, canal, stream;
 let eu = Math.random().toString(36).slice(2, 10);   // meu "endereço" na sala
@@ -146,10 +159,7 @@ $('go').onclick = transmitir;
 /* ---------- QUEM TRANSMITE ---------- */
 async function transmitir() {
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-    });
+    stream = await navigator.mediaDevices.getDisplayMedia(CAPTURA);
   } catch (e) { status('Transmissão cancelada.', true); return; }
 
   const vt = stream.getVideoTracks()[0];
@@ -177,8 +187,24 @@ async function transmitir() {
   $('link').value = location.origin + location.pathname + '?sala=' + id;
   $('hostbar').hidden = false;
   show('stage');
-  video.srcObject = stream; video.muted = true; video.play();
+  $('hostbar2').hidden = false;
+  video.hidden = true; $('aviso').hidden = false;     // prévia começa oculta
+  atualizarSom();
   status('Conectando ao servidor de encontro…');
+
+  $('btnPrev').onclick = () => {
+    previa = !previa;
+    video.hidden = !previa; $('aviso').hidden = previa;
+    video.srcObject = previa ? stream : null;
+    if (previa) { video.muted = true; video.play(); }
+    $('btnPrev').textContent = previa ? 'Ocultar prévia' : 'Mostrar prévia';
+  };
+  $('btnSom').onclick = () => { somLigado = !somLigado; atualizarSom(); };
+  $('btnTroca').onclick = trocarTela;
+  $('btnParar').onclick = () => {
+    stream.getTracks().forEach(t => { t.onended = null; t.stop(); });
+    location.href = location.pathname;
+  };
 
   $('copy').onclick = async () => {
     await navigator.clipboard.writeText($('link').value);
@@ -196,6 +222,7 @@ async function criarPar(amigo) {
   const c = { loc: [], rec: 0 };
   pares[amigo] = { pc, fila: [], pronto: false, c };
   stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  if (!stream.getAudioTracks().length) pc.addTransceiver('audio', { direction: 'sendonly' });
   await ajustar(pc);
   pc.onicecandidate = ev => {
     if (ev.candidate) { c.loc.push(tipo(ev.candidate)); enviar(amigo, 'ice', ev.candidate.toJSON()); }
@@ -208,6 +235,35 @@ async function criarPar(amigo) {
   };
   await pc.setLocalDescription(await pc.createOffer());
   enviar(amigo, 'offer', pc.localDescription.toJSON());
+}
+
+function atualizarSom() {
+  const tem = stream.getAudioTracks().length > 0;
+  const b = $('btnSom');
+  b.disabled = !tem;
+  b.textContent = !tem ? 'Sem som (marque "Compartilhar áudio")' : somLigado ? 'Som: ligado' : 'Som: desligado';
+  stream.getAudioTracks().forEach(t => { t.enabled = somLigado; });   // desligado = os amigos recebem silêncio
+}
+
+async function trocarTela() {
+  let novo;
+  try { novo = await navigator.mediaDevices.getDisplayMedia(CAPTURA); } catch (e) { return; }   // cancelou: continua como está
+  const nv = novo.getVideoTracks()[0], na = novo.getAudioTracks()[0] || null;
+  nv.contentHint = 'motion';
+  nv.onended = () => { location.href = location.pathname; };
+  for (const e of Object.values(pares)) {
+    for (const tr of e.pc.getTransceivers()) {
+      const k = tr.receiver && tr.receiver.track && tr.receiver.track.kind;
+      try {
+        if (k === 'video') await tr.sender.replaceTrack(nv);
+        else if (k === 'audio') await tr.sender.replaceTrack(na);
+      } catch (err) { console.log(err); }
+    }
+  }
+  stream.getTracks().forEach(t => { t.onended = null; t.stop(); });   // soltar a tela antiga
+  stream = novo;
+  if (previa) { video.srcObject = stream; video.muted = true; video.play(); }
+  atualizarSom();
 }
 
 function contar() {
