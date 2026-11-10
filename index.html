@@ -129,6 +129,7 @@ async function transmitir() {
     conn.on('close', () => { viewers.delete(conn.peer); contar(); });
   });
   peer.on('error', e => status('Erro: ' + e.type, true));
+  peer.on('disconnected', () => { status('Perdeu contato com o servidor. Reconectando…', true); peer.reconnect(); });
 
   $('copy').onclick = async () => {
     await navigator.clipboard.writeText($('link').value);
@@ -167,7 +168,8 @@ async function ajustar(call) {
 function assistir(id) {
   show('stage'); $('viewbar').hidden = false;
   status('Conectando…');
-  const espera = setTimeout(() => status('Não conseguiu conectar com quem transmite. A rede pode estar bloqueando a conexão direta.', true), 15000);
+  let falhou = false;
+  const espera = setTimeout(() => { if (!falhou) status('Quem transmite não respondeu. Confira se a transmissão está aberta e se o link é o mais recente.', true); }, 15000);
   peer = new Peer(undefined, { config: ICE });
   peer.on('open', () => {
     status('Procurando a sala…');
@@ -189,8 +191,8 @@ function assistir(id) {
     });
     call.on('close', () => status('A transmissão terminou.', true));
   });
-  peer.on('error', e => status(e.type === 'peer-unavailable'
-    ? 'Sala não encontrada. Peça um link novo.' : 'Erro: ' + e.type, true));
+  peer.on('error', e => { falhou = true; status(e.type === 'peer-unavailable'
+    ? 'Sala não encontrada. Peça um link novo.' : 'Erro: ' + e.type, true); });
 
   $('sound').onclick = () => { video.muted = false; $('sound').hidden = true; };
   $('full').onclick = () => video.requestFullscreen && video.requestFullscreen();
