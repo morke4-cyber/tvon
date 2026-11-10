@@ -37,6 +37,7 @@ video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000;border-r
 <header>
   <h1>Sala de tela</h1>
   <span id="status"></span>
+  <span id="dbg" style="color:var(--mute);font-size:12px"></span>
 </header>
 <main>
   <section id="home" class="card" hidden>
@@ -117,7 +118,10 @@ async function transmitir() {
     status('Você está ao vivo');
   });
   peer.on('connection', conn => {
+    status('Um amigo está entrando…');
+    acompanhar(conn, 'Amigo');
     conn.on('open', () => {
+      status('Você está ao vivo');
       viewers.add(conn.peer); contar();
       const call = peer.call(conn.peer, stream);
       setTimeout(() => ajustar(call), 1500);
@@ -131,6 +135,17 @@ async function transmitir() {
     $('copy').textContent = 'Link copiado';
     setTimeout(() => $('copy').textContent = 'Copiar link', 1800);
   };
+}
+
+function acompanhar(conn, quem) {
+  setTimeout(() => {
+    const pc = conn.peerConnection;
+    if (!pc) return;
+    $('dbg').textContent = quem + ': ' + pc.iceConnectionState;
+    pc.addEventListener('iceconnectionstatechange', () => {
+      $('dbg').textContent = quem + ': ' + pc.iceConnectionState;
+    });
+  }, 300);
 }
 
 const contar = () => { $('count').textContent = viewers.size + ' assistindo'; };
@@ -154,7 +169,13 @@ function assistir(id) {
   status('Conectando…');
   const espera = setTimeout(() => status('Não conseguiu conectar com quem transmite. A rede pode estar bloqueando a conexão direta.', true), 15000);
   peer = new Peer(undefined, { config: ICE });
-  peer.on('open', () => { viewerConn = peer.connect(id, { reliable: true }); });
+  peer.on('open', () => {
+    status('Procurando a sala…');
+    viewerConn = peer.connect(id, { reliable: true });
+    acompanhar(viewerConn, 'Conexão');
+    viewerConn.on('open', () => status('Sala encontrada. Recebendo o vídeo…'));
+    viewerConn.on('error', e => status('Erro na conexão: ' + e, true));
+  });
   peer.on('call', call => {
     call.answer();
     call.on('stream', s => {
@@ -168,7 +189,8 @@ function assistir(id) {
     });
     call.on('close', () => status('A transmissão terminou.', true));
   });
-  peer.on('error', () => status('Sala não encontrada. Peça um link novo.', true));
+  peer.on('error', e => status(e.type === 'peer-unavailable'
+    ? 'Sala não encontrada. Peça um link novo.' : 'Erro: ' + e.type, true));
 
   $('sound').onclick = () => { video.muted = false; $('sound').hidden = true; };
   $('full').onclick = () => video.requestFullscreen && video.requestFullscreen();
