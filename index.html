@@ -93,9 +93,18 @@ async function transmitir() {
   vt.contentHint = 'motion';               // prioriza fluidez (fps)
   vt.onended = () => { location.href = location.pathname; };
 
+  if (typeof Peer === 'undefined') {
+    status('Erro: não carregou a biblioteca. Verifique a internet e atualize a página.', true);
+    show('home');
+    return;
+  }
+  status('Tela capturada. Conectando ao servidor para gerar o link…');
+  show('stage');
+  const espera = setTimeout(() => status('Demorou demais para conectar. Atualize a página (F5) e tente de novo, ou teste em outra rede.', true), 12000);
   const id = 'sd-' + Math.random().toString(36).slice(2, 10);
   peer = new Peer(id);
   peer.on('open', () => {
+    clearTimeout(espera);
     $('link').value = location.origin + location.pathname + '?sala=' + id;
     $('hostbar').hidden = false;
     show('stage');
