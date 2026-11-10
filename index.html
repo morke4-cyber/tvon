@@ -67,35 +67,43 @@ video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000;border-r
   </section>
 </main>
 
-<script type="module">
-import { joinRoom } from 'https://esm.run/trystero';
-
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
 const $ = id => document.getElementById(id);
 const video = $('video');
-const sala = new URLSearchParams(location.search).get('sala');
-const viewers = new Set();
-let room, stream;
+const salaURL = new URLSearchParams(location.search).get('sala');
+
+/* Dados públicos do seu projeto Supabase (usados só para os dois lados se encontrarem). */
+const SB_URL = 'https://mrnwlmgmyrtotoqnmimb.supabase.co';
+const SB_KEY = 'sb_publishable_g60UNJNzbbdaWp83peoeFA_AM3VOizf';
 
 /* Servidores de apoio à conexão. Se alguns amigos não conseguirem entrar,
    cole aqui os dados do servidor TURN gratuito (ver instruções do Claude). */
 const TURN_SERVERS = [];
 const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...TURN_SERVERS] };
-const APP = { appId: 'sala-de-tela-v1', rtcConfig: ICE };
 
 const status = (t, bad) => { $('status').textContent = t; $('status').className = bad ? 'err' : ''; };
 const show = id => { $('home').hidden = id !== 'home'; $('stage').hidden = id !== 'stage'; };
-const contar = () => { $('count').textContent = viewers.size + ' assistindo'; };
-const pcDe = pid => { try { return room.getPeers()[pid]; } catch (e) { return null; } };
 
-function acompanhar(pid, quem) {
-  const pc = pcDe(pid);
-  if (!pc || !pc.addEventListener) return;
-  const mostra = () => { $('dbg').textContent = quem + ': ' + pc.iceConnectionState; };
-  mostra();
-  pc.addEventListener('iceconnectionstatechange', mostra);
+let sb, canal, stream;
+let eu = Math.random().toString(36).slice(2, 10);   // meu "endereço" na sala
+const pares = {};                                    // quem transmite: um por amigo
+
+function abrirCanal(sala, aoReceber, aoStatus) {
+  if (!window.supabase) { status('Erro: não carregou o Supabase. Verifique a internet e atualize a página.', true); return false; }
+  sb = window.supabase.createClient(SB_URL, SB_KEY);
+  canal = sb.channel('tela-' + sala, { config: { broadcast: { self: false } } });
+  canal.on('broadcast', { event: 'sig' }, ({ payload }) => { if (payload.to === eu) aoReceber(payload); });
+  canal.subscribe((st, err) => {
+    if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT')
+      status('Erro no servidor de encontro (Supabase): ' + ((err && err.message) || st), true);
+    else aoStatus(st);
+  });
+  return true;
 }
+const enviar = (to, type, data) => canal.send({ type: 'broadcast', event: 'sig', payload: { to, from: eu, type, data } });
 
-if (sala) assistir(sala); else show('home');
+if (salaURL) assistir(salaURL); else show('home');
 $('go').onclick = transmitir;
 
 /* ---------- QUEM TRANSMITE ---------- */
@@ -112,21 +120,27 @@ async function transmitir() {
   vt.onended = () => { location.href = location.pathname; };
 
   const id = Math.random().toString(36).slice(2, 10);
-  room = joinRoom(APP, id);
+  eu = 'host';
+  const ok = abrirCanal(id, async m => {
+    if (m.type === 'hello') criarPar(m.from);
+    const e = pares[m.from];
+    if (!e) return;
+    if (m.type === 'answer') {
+      await e.pc.setRemoteDescription(m.data);
+      e.pronto = true;
+      e.fila.forEach(c => e.pc.addIceCandidate(c).catch(() => {}));
+      e.fila = [];
+    } else if (m.type === 'ice') {
+      if (e.pronto) e.pc.addIceCandidate(m.data).catch(() => {}); else e.fila.push(m.data);
+    }
+  }, st => { if (st === 'SUBSCRIBED') status('Você está ao vivo'); });
+  if (!ok) return;
+
   $('link').value = location.origin + location.pathname + '?sala=' + id;
   $('hostbar').hidden = false;
   show('stage');
   video.srcObject = stream; video.muted = true; video.play();
-  status('Você está ao vivo');
-
-  room.onPeerJoin(pid => {
-    viewers.add(pid); contar();
-    status('Um amigo está entrando…');
-    room.addStream(stream, pid);
-    acompanhar(pid, 'Amigo');
-    setTimeout(() => { status('Você está ao vivo'); ajustar(pid); }, 2000);
-  });
-  room.onPeerLeave(pid => { viewers.delete(pid); contar(); });
+  status('Conectando ao servidor de encontro…');
 
   $('copy').onclick = async () => {
     await navigator.clipboard.writeText($('link').value);
@@ -135,45 +149,90 @@ async function transmitir() {
   };
 }
 
-async function ajustar(pid) {
-  const pc = pcDe(pid);
-  if (!pc || !pc.getSenders) return;
+async function criarPar(amigo) {
+  const velho = pares[amigo];
+  if (velho && ['new', 'connecting', 'connected'].includes(velho.pc.connectionState)) return;
+  if (velho) velho.pc.close();
+  status('Um amigo está entrando…');
+  const pc = new RTCPeerConnection(ICE);
+  pares[amigo] = { pc, fila: [], pronto: false };
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  await ajustar(pc);
+  pc.onicecandidate = ev => { if (ev.candidate) enviar(amigo, 'ice', ev.candidate.toJSON()); };
+  pc.oniceconnectionstatechange = () => { $('dbg').textContent = 'Amigo: ' + pc.iceConnectionState; };
+  pc.onconnectionstatechange = () => {
+    contar();
+    if (pc.connectionState === 'connected') { status('Você está ao vivo'); ajustar(pc); }
+  };
+  await pc.setLocalDescription(await pc.createOffer());
+  enviar(amigo, 'offer', pc.localDescription.toJSON());
+}
+
+function contar() {
+  const n = Object.values(pares).filter(e => e.pc.connectionState === 'connected').length;
+  $('count').textContent = n + ' assistindo';
+}
+
+async function ajustar(pc) {
   const bps = Number($('rate').value) * 1e6;
   for (const s of pc.getSenders()) {
     if (!s.track || s.track.kind !== 'video') continue;
-    const p = s.getParameters();
-    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-    p.encodings[0].maxBitrate = bps;
-    p.encodings[0].maxFramerate = 60;
-    p.degradationPreference = 'maintain-framerate';   // mantém fps, cede resolução só se faltar internet
-    try { await s.setParameters(p); } catch (e) { console.log(e); }
+    try {
+      const p = s.getParameters();
+      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      p.encodings[0].maxBitrate = bps;
+      p.encodings[0].maxFramerate = 60;
+      p.degradationPreference = 'maintain-framerate';   // mantém fps, cede resolução só se faltar internet
+      await s.setParameters(p);
+    } catch (e) { console.log(e); }
   }
 }
 
 /* ---------- QUEM ASSISTE ---------- */
-function assistir(id) {
+function assistir(sala) {
   show('stage'); $('viewbar').hidden = false;
-  status('Procurando a sala…');
-  let hostId = null;
-  const espera = setTimeout(() => status('Não achou a transmissão. Confira se ela continua aberta e se o link é o mais recente.', true), 20000);
-  room = joinRoom(APP, id);
+  status('Conectando ao servidor de encontro…');
+  let pc = null, fila = [], pronto = false, recebeuOferta = false, timer;
 
-  room.onPeerJoin(pid => {
-    status('Alguém na sala. Recebendo o vídeo…');
-    acompanhar(pid, 'Conexão');
-  });
-  room.onPeerStream((s, pid) => {
-    hostId = pid;
-    clearTimeout(espera);
-    video.srcObject = s; video.muted = true; video.play();
-    status('Ao vivo');
-    const pc = pcDe(pid);
-    if (pc && pc.getReceivers) for (const r of pc.getReceivers()) {   // menor atraso possível
-      try { r.jitterBufferTarget = 0; } catch (e) {}
-      try { r.playoutDelayHint = 0; } catch (e) {}
+  const espera = setTimeout(() => status(recebeuOferta
+    ? 'Achou a transmissão, mas o vídeo não chegou. A rede pode estar bloqueando a conexão direta.'
+    : 'Não achou a transmissão. Confira se ela continua aberta e se o link é o mais recente.', true), 20000);
+
+  abrirCanal(sala, async m => {
+    if (m.type === 'offer') {
+      recebeuOferta = true;
+      clearInterval(timer);
+      status('Transmissão encontrada. Conectando…');
+      pc = new RTCPeerConnection(ICE);
+      pc.onicecandidate = ev => { if (ev.candidate) enviar('host', 'ice', ev.candidate.toJSON()); };
+      pc.oniceconnectionstatechange = () => { $('dbg').textContent = 'Conexão: ' + pc.iceConnectionState; };
+      pc.onconnectionstatechange = () => {
+        if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) status('A transmissão terminou ou a conexão caiu.', true);
+      };
+      pc.ontrack = ev => {
+        clearTimeout(espera);
+        video.srcObject = ev.streams[0]; video.muted = true; video.play();
+        status('Ao vivo');
+        for (const r of pc.getReceivers()) {   // menor atraso possível
+          try { r.jitterBufferTarget = 0; } catch (e) {}
+          try { r.playoutDelayHint = 0; } catch (e) {}
+        }
+      };
+      await pc.setRemoteDescription(m.data);
+      pronto = true;
+      fila.forEach(c => pc.addIceCandidate(c).catch(() => {}));
+      fila = [];
+      await pc.setLocalDescription(await pc.createAnswer());
+      enviar('host', 'answer', pc.localDescription.toJSON());
+    } else if (m.type === 'ice') {
+      if (pronto) pc.addIceCandidate(m.data).catch(() => {}); else fila.push(m.data);
     }
+  }, st => {
+    if (st !== 'SUBSCRIBED') return;
+    status('Procurando a transmissão…');
+    enviar('host', 'hello', null);
+    timer = setInterval(() => enviar('host', 'hello', null), 2000);   // repete até a transmissão responder
   });
-  room.onPeerLeave(pid => { if (pid === hostId) status('A transmissão terminou.', true); });
 
   $('sound').onclick = () => { video.muted = false; $('sound').hidden = true; };
   $('full').onclick = () => video.requestFullscreen && video.requestFullscreen();
