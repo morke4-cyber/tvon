@@ -85,6 +85,12 @@ const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...TURN_SER
 const status = (t, bad) => { $('status').textContent = t; $('status').className = bad ? 'err' : ''; };
 const show = id => { $('home').hidden = id !== 'home'; $('stage').hidden = id !== 'stage'; };
 
+const tipo = c => (/ typ (\w+)/.exec(c.candidate) || [])[1] || '?';
+function painel(quem, pc, c) {
+  $('dbg').textContent = quem + ' · ICE: ' + pc.iceConnectionState +
+    ' · candidatos meus: ' + (c.loc.length ? c.loc.join(',') : 'nenhum') + ' · recebidos: ' + c.rec;
+}
+
 let sb, canal, stream;
 let eu = Math.random().toString(36).slice(2, 10);   // meu "endereço" na sala
 const pares = {};                                    // quem transmite: um por amigo
@@ -131,6 +137,7 @@ async function transmitir() {
       e.fila.forEach(c => e.pc.addIceCandidate(c).catch(() => {}));
       e.fila = [];
     } else if (m.type === 'ice') {
+      e.c.rec++; painel('Transmissor', e.pc, e.c);
       if (e.pronto) e.pc.addIceCandidate(m.data).catch(() => {}); else e.fila.push(m.data);
     }
   }, st => { if (st === 'SUBSCRIBED') status('Você está ao vivo'); });
@@ -155,11 +162,15 @@ async function criarPar(amigo) {
   if (velho) velho.pc.close();
   status('Um amigo está entrando…');
   const pc = new RTCPeerConnection(ICE);
-  pares[amigo] = { pc, fila: [], pronto: false };
+  const c = { loc: [], rec: 0 };
+  pares[amigo] = { pc, fila: [], pronto: false, c };
   stream.getTracks().forEach(t => pc.addTrack(t, stream));
   await ajustar(pc);
-  pc.onicecandidate = ev => { if (ev.candidate) enviar(amigo, 'ice', ev.candidate.toJSON()); };
-  pc.oniceconnectionstatechange = () => { $('dbg').textContent = 'Amigo: ' + pc.iceConnectionState; };
+  pc.onicecandidate = ev => {
+    if (ev.candidate) { c.loc.push(tipo(ev.candidate)); enviar(amigo, 'ice', ev.candidate.toJSON()); }
+    painel('Transmissor', pc, c);
+  };
+  pc.oniceconnectionstatechange = () => { painel('Transmissor', pc, c); contar(); };
   pc.onconnectionstatechange = () => {
     contar();
     if (pc.connectionState === 'connected') { status('Você está ao vivo'); ajustar(pc); }
@@ -169,7 +180,7 @@ async function criarPar(amigo) {
 }
 
 function contar() {
-  const n = Object.values(pares).filter(e => e.pc.connectionState === 'connected').length;
+  const n = Object.values(pares).filter(e => ['connected', 'completed'].includes(e.pc.iceConnectionState)).length;
   $('count').textContent = n + ' assistindo';
 }
 
@@ -193,6 +204,7 @@ function assistir(sala) {
   show('stage'); $('viewbar').hidden = false;
   status('Conectando ao servidor de encontro…');
   let pc = null, fila = [], pronto = false, recebeuOferta = false, timer;
+  const c = { loc: [], rec: 0 };
 
   const espera = setTimeout(() => status(recebeuOferta
     ? 'Achou a transmissão, mas o vídeo não chegou. A rede pode estar bloqueando a conexão direta.'
@@ -204,15 +216,17 @@ function assistir(sala) {
       clearInterval(timer);
       status('Transmissão encontrada. Conectando…');
       pc = new RTCPeerConnection(ICE);
-      pc.onicecandidate = ev => { if (ev.candidate) enviar('host', 'ice', ev.candidate.toJSON()); };
-      pc.oniceconnectionstatechange = () => { $('dbg').textContent = 'Conexão: ' + pc.iceConnectionState; };
+      pc.onicecandidate = ev => {
+        if (ev.candidate) { c.loc.push(tipo(ev.candidate)); enviar('host', 'ice', ev.candidate.toJSON()); }
+        painel('Espectador', pc, c);
+      };
+      pc.oniceconnectionstatechange = () => painel('Espectador', pc, c);
       pc.onconnectionstatechange = () => {
         if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) status('A transmissão terminou ou a conexão caiu.', true);
       };
       pc.ontrack = ev => {
-        clearTimeout(espera);
         video.srcObject = ev.streams[0]; video.muted = true; video.play();
-        status('Ao vivo');
+        status('Conectando o vídeo…');
         for (const r of pc.getReceivers()) {   // menor atraso possível
           try { r.jitterBufferTarget = 0; } catch (e) {}
           try { r.playoutDelayHint = 0; } catch (e) {}
@@ -225,6 +239,7 @@ function assistir(sala) {
       await pc.setLocalDescription(await pc.createAnswer());
       enviar('host', 'answer', pc.localDescription.toJSON());
     } else if (m.type === 'ice') {
+      c.rec++; if (pc) painel('Espectador', pc, c);
       if (pronto) pc.addIceCandidate(m.data).catch(() => {}); else fila.push(m.data);
     }
   }, st => {
@@ -234,6 +249,7 @@ function assistir(sala) {
     timer = setInterval(() => enviar('host', 'hello', null), 2000);   // repete até a transmissão responder
   });
 
+  video.addEventListener('playing', () => { clearTimeout(espera); status('Ao vivo'); });
   $('sound').onclick = () => { video.muted = false; $('sound').hidden = true; };
   $('full').onclick = () => video.requestFullscreen && video.requestFullscreen();
   video.addEventListener('resize', () => {
