@@ -42,6 +42,11 @@ video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000;border-r
   <section id="home" class="card" hidden>
     <h2>Transmitir sua tela</h2>
     <p>Escolha a tela ou aba e envie o link para seus amigos. Eles veem ao vivo, sem instalar nada.</p>
+    <label for="link0">Link para os amigos (copie e mande antes de começar)</label>
+    <div class="bar" style="margin-bottom:18px">
+      <input id="link0" readonly aria-label="Link para os amigos">
+      <button id="copy0" class="sec">Copiar link</button>
+    </div>
     <label for="rate">Qualidade do vídeo (quanto maior, mais internet de envio)</label>
     <select id="rate">
       <option value="6">Boa (6 Mbps)</option>
@@ -91,9 +96,35 @@ function painel(quem, pc, c) {
     ' · candidatos meus: ' + (c.loc.length ? c.loc.join(',') : 'nenhum') + ' · recebidos: ' + c.rec;
 }
 
+const idSala = Math.random().toString(36).slice(2, 10);
+$('link0').value = location.origin + location.pathname + '?sala=' + idSala;
+$('copy0').onclick = async () => {
+  try { await navigator.clipboard.writeText($('link0').value); } catch (e) { $('link0').select(); document.execCommand('copy'); }
+  $('copy0').textContent = 'Link copiado';
+  setTimeout(() => $('copy0').textContent = 'Copiar link', 1800);
+};
+
 let sb, canal, stream;
 let eu = Math.random().toString(36).slice(2, 10);   // meu "endereço" na sala
 const pares = {};                                    // quem transmite: um por amigo
+
+/* Pede ao transmissor que comece já em alta qualidade (por padrão o navegador começa baixo e sobe devagar). */
+function altaQualidade(sdp, minK, startK, maxK) {
+  const linhas = sdp.split('\r\n'), saida = [];
+  let video = false;
+  for (let i = 0; i < linhas.length; i++) {
+    const l = linhas[i];
+    if (l.startsWith('m=')) video = l.startsWith('m=video');
+    saida.push(l);
+    const m = video && /^a=rtpmap:(\d+) (VP8|VP9|H264|AV1)\//.exec(l);
+    if (!m) continue;
+    const extra = 'x-google-min-bitrate=' + minK + ';x-google-start-bitrate=' + startK + ';x-google-max-bitrate=' + maxK;
+    const pt = m[1];
+    const j = linhas.findIndex(x => x.startsWith('a=fmtp:' + pt + ' '));
+    if (j >= 0) linhas[j] = linhas[j] + ';' + extra; else saida.push('a=fmtp:' + pt + ' ' + extra);
+  }
+  return saida.join('\r\n');
+}
 
 function abrirCanal(sala, aoReceber, aoStatus) {
   if (!window.supabase) { status('Erro: não carregou o Supabase. Verifique a internet e atualize a página.', true); return false; }
@@ -125,7 +156,7 @@ async function transmitir() {
   vt.contentHint = 'motion';               // prioriza fluidez (fps)
   vt.onended = () => { location.href = location.pathname; };
 
-  const id = Math.random().toString(36).slice(2, 10);
+  const id = idSala;
   eu = 'host';
   const ok = abrirCanal(id, async m => {
     if (m.type === 'hello') criarPar(m.from);
@@ -193,6 +224,9 @@ async function ajustar(pc) {
       if (!p.encodings || !p.encodings.length) p.encodings = [{}];
       p.encodings[0].maxBitrate = bps;
       p.encodings[0].maxFramerate = 60;
+      p.encodings[0].scaleResolutionDownBy = 1;     // não reduzir a resolução por conta própria
+      p.encodings[0].priority = 'high';
+      p.encodings[0].networkPriority = 'high';
       p.degradationPreference = 'maintain-framerate';   // mantém fps, cede resolução só se faltar internet
       await s.setParameters(p);
     } catch (e) { console.log(e); }
@@ -206,9 +240,10 @@ function assistir(sala) {
   let pc = null, fila = [], pronto = false, recebeuOferta = false, timer;
   const c = { loc: [], rec: 0 };
 
-  const espera = setTimeout(() => status(recebeuOferta
-    ? 'Achou a transmissão, mas o vídeo não chegou. A rede pode estar bloqueando a conexão direta.'
-    : 'Não achou a transmissão. Confira se ela continua aberta e se o link é o mais recente.', true), 20000);
+  const espera = setTimeout(() => {
+    if (recebeuOferta) status('Achou a transmissão, mas o vídeo não chegou. A rede pode estar bloqueando a conexão direta.', true);
+    else status('Aguardando a transmissão começar… Se demorar, confira se o link é o mesmo que o transmissor copiou.');
+  }, 20000);
 
   abrirCanal(sala, async m => {
     if (m.type === 'offer') {
@@ -228,15 +263,16 @@ function assistir(sala) {
         video.srcObject = ev.streams[0]; video.muted = true; video.play();
         status('Conectando o vídeo…');
         for (const r of pc.getReceivers()) {   // menor atraso possível
-          try { r.jitterBufferTarget = 0; } catch (e) {}
-          try { r.playoutDelayHint = 0; } catch (e) {}
+          try { r.jitterBufferTarget = 150; } catch (e) {}   // 0,15 s de colchão: bem pouco atraso e sem tremer
         }
       };
       await pc.setRemoteDescription(m.data);
       pronto = true;
       fila.forEach(c => pc.addIceCandidate(c).catch(() => {}));
       fila = [];
-      await pc.setLocalDescription(await pc.createAnswer());
+      const resp = await pc.createAnswer();
+      resp.sdp = altaQualidade(resp.sdp, 3000, 8000, 20000);
+      await pc.setLocalDescription(resp);
       enviar('host', 'answer', pc.localDescription.toJSON());
     } else if (m.type === 'ice') {
       c.rec++; if (pc) painel('Espectador', pc, c);
