@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sala de tela</title>
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
 :root{--bg:#14172b;--panel:#1d2140;--tx:#e8ecf8;--mute:#98a0c4;--ac:#5cc8ff;--bad:#ff6b8a}
 *{box-sizing:border-box}
@@ -68,20 +67,33 @@ video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000;border-r
   </section>
 </main>
 
-<script>
+<script type="module">
+import { joinRoom } from 'https://esm.run/trystero';
+
 const $ = id => document.getElementById(id);
 const video = $('video');
 const sala = new URLSearchParams(location.search).get('sala');
-let peer, stream, viewerConn;
 const viewers = new Set();
+let room, stream;
 
 /* Servidores de apoio à conexão. Se alguns amigos não conseguirem entrar,
    cole aqui os dados do servidor TURN gratuito (ver instruções do Claude). */
 const TURN_SERVERS = [];
 const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...TURN_SERVERS] };
+const APP = { appId: 'sala-de-tela-v1', rtcConfig: ICE };
 
 const status = (t, bad) => { $('status').textContent = t; $('status').className = bad ? 'err' : ''; };
 const show = id => { $('home').hidden = id !== 'home'; $('stage').hidden = id !== 'stage'; };
+const contar = () => { $('count').textContent = viewers.size + ' assistindo'; };
+const pcDe = pid => { try { return room.getPeers()[pid]; } catch (e) { return null; } };
+
+function acompanhar(pid, quem) {
+  const pc = pcDe(pid);
+  if (!pc || !pc.addEventListener) return;
+  const mostra = () => { $('dbg').textContent = quem + ': ' + pc.iceConnectionState; };
+  mostra();
+  pc.addEventListener('iceconnectionstatechange', mostra);
+}
 
 if (sala) assistir(sala); else show('home');
 $('go').onclick = transmitir;
@@ -99,37 +111,22 @@ async function transmitir() {
   vt.contentHint = 'motion';               // prioriza fluidez (fps)
   vt.onended = () => { location.href = location.pathname; };
 
-  if (typeof Peer === 'undefined') {
-    status('Erro: não carregou a biblioteca. Verifique a internet e atualize a página.', true);
-    show('home');
-    return;
-  }
-  status('Tela capturada. Conectando ao servidor para gerar o link…');
+  const id = Math.random().toString(36).slice(2, 10);
+  room = joinRoom(APP, id);
+  $('link').value = location.origin + location.pathname + '?sala=' + id;
+  $('hostbar').hidden = false;
   show('stage');
-  const espera = setTimeout(() => status('Demorou demais para conectar. Atualize a página (F5) e tente de novo, ou teste em outra rede.', true), 12000);
-  const id = 'sd-' + Math.random().toString(36).slice(2, 10);
-  peer = new Peer(id, { config: ICE });
-  peer.on('open', () => {
-    clearTimeout(espera);
-    $('link').value = location.origin + location.pathname + '?sala=' + id;
-    $('hostbar').hidden = false;
-    show('stage');
-    video.srcObject = stream; video.muted = true; video.play();
-    status('Você está ao vivo');
-  });
-  peer.on('connection', conn => {
+  video.srcObject = stream; video.muted = true; video.play();
+  status('Você está ao vivo');
+
+  room.onPeerJoin(pid => {
+    viewers.add(pid); contar();
     status('Um amigo está entrando…');
-    acompanhar(conn, 'Amigo');
-    conn.on('open', () => {
-      status('Você está ao vivo');
-      viewers.add(conn.peer); contar();
-      const call = peer.call(conn.peer, stream);
-      setTimeout(() => ajustar(call), 1500);
-    });
-    conn.on('close', () => { viewers.delete(conn.peer); contar(); });
+    room.addStream(stream, pid);
+    acompanhar(pid, 'Amigo');
+    setTimeout(() => { status('Você está ao vivo'); ajustar(pid); }, 2000);
   });
-  peer.on('error', e => status('Erro: ' + e.type, true));
-  peer.on('disconnected', () => { status('Perdeu contato com o servidor. Reconectando…', true); peer.reconnect(); });
+  room.onPeerLeave(pid => { viewers.delete(pid); contar(); });
 
   $('copy').onclick = async () => {
     await navigator.clipboard.writeText($('link').value);
@@ -138,22 +135,11 @@ async function transmitir() {
   };
 }
 
-function acompanhar(conn, quem) {
-  setTimeout(() => {
-    const pc = conn.peerConnection;
-    if (!pc) return;
-    $('dbg').textContent = quem + ': ' + pc.iceConnectionState;
-    pc.addEventListener('iceconnectionstatechange', () => {
-      $('dbg').textContent = quem + ': ' + pc.iceConnectionState;
-    });
-  }, 300);
-}
-
-const contar = () => { $('count').textContent = viewers.size + ' assistindo'; };
-
-async function ajustar(call) {
+async function ajustar(pid) {
+  const pc = pcDe(pid);
+  if (!pc || !pc.getSenders) return;
   const bps = Number($('rate').value) * 1e6;
-  for (const s of call.peerConnection.getSenders()) {
+  for (const s of pc.getSenders()) {
     if (!s.track || s.track.kind !== 'video') continue;
     const p = s.getParameters();
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
@@ -167,32 +153,27 @@ async function ajustar(call) {
 /* ---------- QUEM ASSISTE ---------- */
 function assistir(id) {
   show('stage'); $('viewbar').hidden = false;
-  status('Conectando…');
-  let falhou = false;
-  const espera = setTimeout(() => { if (!falhou) status('Quem transmite não respondeu. Confira se a transmissão está aberta e se o link é o mais recente.', true); }, 15000);
-  peer = new Peer(undefined, { config: ICE });
-  peer.on('open', () => {
-    status('Procurando a sala…');
-    viewerConn = peer.connect(id, { reliable: true });
-    acompanhar(viewerConn, 'Conexão');
-    viewerConn.on('open', () => status('Sala encontrada. Recebendo o vídeo…'));
-    viewerConn.on('error', e => status('Erro na conexão: ' + e, true));
+  status('Procurando a sala…');
+  let hostId = null;
+  const espera = setTimeout(() => status('Não achou a transmissão. Confira se ela continua aberta e se o link é o mais recente.', true), 20000);
+  room = joinRoom(APP, id);
+
+  room.onPeerJoin(pid => {
+    status('Alguém na sala. Recebendo o vídeo…');
+    acompanhar(pid, 'Conexão');
   });
-  peer.on('call', call => {
-    call.answer();
-    call.on('stream', s => {
-      clearTimeout(espera);
-      video.srcObject = s; video.muted = true; video.play();
-      status('Ao vivo');
-      for (const r of call.peerConnection.getReceivers()) {   // menor atraso possível
-        try { r.jitterBufferTarget = 0; } catch (e) {}
-        try { r.playoutDelayHint = 0; } catch (e) {}
-      }
-    });
-    call.on('close', () => status('A transmissão terminou.', true));
+  room.onPeerStream((s, pid) => {
+    hostId = pid;
+    clearTimeout(espera);
+    video.srcObject = s; video.muted = true; video.play();
+    status('Ao vivo');
+    const pc = pcDe(pid);
+    if (pc && pc.getReceivers) for (const r of pc.getReceivers()) {   // menor atraso possível
+      try { r.jitterBufferTarget = 0; } catch (e) {}
+      try { r.playoutDelayHint = 0; } catch (e) {}
+    }
   });
-  peer.on('error', e => { falhou = true; status(e.type === 'peer-unavailable'
-    ? 'Sala não encontrada. Peça um link novo.' : 'Erro: ' + e.type, true); });
+  room.onPeerLeave(pid => { if (pid === hostId) status('A transmissão terminou.', true); });
 
   $('sound').onclick = () => { video.muted = false; $('sound').hidden = true; };
   $('full').onclick = () => video.requestFullscreen && video.requestFullscreen();
